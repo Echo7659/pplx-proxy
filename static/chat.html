@@ -55,7 +55,9 @@ body{font-family:var(--font);background:var(--bg);color:var(--text);height:100vh
 <body>
 <div class="hdr">
 <h1>pplx-proxy debug</h1>
-<select id="mdl"><option value="gpt">gpt</option><option value="gpt-5.6-terra">gpt-5.6-terra</option><option value="gpt-5.6-sol">gpt-5.6-sol</option><option value="gpt-5.5">gpt-5.5</option><option value="gpt-mini">gpt-mini</option><option value="gpt-nano">gpt-nano</option><option value="sonnet" selected>sonnet</option><option value="sonnet-5">sonnet-5</option><option value="sonnet-4.6">sonnet-4.6</option><option value="gemini">gemini</option><option value="gemini-flash">gemini-flash</option><option value="grok">grok</option><option value="grok-4.6">grok-4.6</option><option value="grok-4.5">grok-4.5</option><option value="grok-4">grok-4</option><option value="grok-reasoning">grok-reasoning</option><option value="grok-non-reasoning">grok-non-reasoning</option><option value="nemotron">nemotron</option><option value="nemotron-3-super">nemotron-3-super</option><option value="glm-5.2">glm-5.2</option><option value="kimi-k2.6">kimi-k2.6</option><option value="kimi-k3">kimi-k3</option><option value="sonar">sonar</option><option value="auto">auto</option><option value="opus">opus</option><option value="opus-4.8">opus-4.8</option><option value="opus-4.7">opus-4.7</option><option value="opus-4.6">opus-4.6</option></select>
+<select id="mdl" aria-label="Model" disabled></select>
+<button id="mrf" onclick="loadModels()" style="background:var(--border)" title="Refresh available models" aria-label="Refresh available models">↻</button>
+<span id="mst" role="status" aria-live="polite" style="font-size:9px;color:var(--dim)">Loading models…</span>
 <label><input type="checkbox" id="thk">thinking</label>
 <label><input type="checkbox" id="str" checked>stream</label>
 <button id="tlb" onclick="tglTools()" style="background:var(--border)">Test unsupported tools OFF</button>
@@ -94,6 +96,37 @@ const B=location.origin,TOOLS=[
 let H=[],tl=false;
 const $=id=>document.getElementById(id);
 $('inp').onkeydown=e=>{if(e.key==='Enter')go()};
+let modelsRequest=0,modelsKey=null,modelsAbort=null;
+async function loadModels(){
+const request=++modelsRequest,key=$('key').value.trim(),selected=$('mdl').value||'auto';
+modelsKey=key;modelsAbort?.abort();
+const controller=new AbortController();modelsAbort=controller;
+const timeout=setTimeout(()=>controller.abort(),20000);
+$('mdl').replaceChildren();$('mdl').disabled=true;$('mrf').disabled=true;
+$('mst').textContent='Loading models…';$('mst').style.color='var(--dim)';
+try{
+const headers={};if(key)headers.Authorization='Bearer '+key;
+const response=await fetch(B+'/v1/models',{headers,signal:controller.signal,cache:'no-store'});
+if(!response.ok)throw new Error(response.status===401?(key?'Invalid API key':'Enter API key'):'HTTP '+response.status);
+const body=await response.json();
+if(!Array.isArray(body.data)||!body.data.length||body.data.some(model=>!model||typeof model.id!=='string'||!model.id.trim()))throw new Error('Empty or invalid model list');
+if(request!==modelsRequest||key!==$('key').value.trim())return;
+const models=[...new Map(body.data.map(model=>[model.id,model])).values()];
+const options=models.map(model=>{
+const option=document.createElement('option');option.value=model.id;
+option.textContent=[model.name,model.display_name,model.label,model.id].find(label=>typeof label==='string'&&label.trim());
+return option});
+$('mdl').replaceChildren(...options);
+$('mdl').value=models.some(model=>model.id===selected)?selected:models.some(model=>model.id==='auto')?'auto':models[0].id;
+$('mdl').disabled=false;$('mst').textContent=models.length+' models';
+}catch(error){
+if(request!==modelsRequest||key!==$('key').value.trim())return;
+$('mst').textContent='Models unavailable: '+(error.name==='AbortError'?'Request timed out. Refresh to retry.':error.message);
+$('mst').style.color='var(--red)';
+}finally{clearTimeout(timeout);if(request===modelsRequest){$('mrf').disabled=false;modelsAbort=null}}
+}
+$('key').onchange=()=>loadModels();
+$('key').onblur=()=>{if(modelsKey!==$('key').value.trim())return loadModels()};
 function L(t){$('db').textContent+=t+'\n';$('db').scrollTop=9e9}
 function E(s){return(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 function tglTools(){tl=!tl;$('tlb').style.background=tl?'var(--green)':'var(--border)';$('tlb').textContent=tl?'Test unsupported tools ON':'Test unsupported tools OFF'}
@@ -257,8 +290,9 @@ if(done){if(data.length)yield data.join('\n');break}
 
 async function go(){
 if($('btn').disabled)return;
+if(!$('mdl').value){$('mst').textContent='Load models before sending';return}
 let t=$('inp').value.trim();if(!t)return;$('inp').value='';
-let md=$('mdl').value,th=$('thk').checked,sr=$('str').checked,k=$('key').value;
+let md=$('mdl').value,th=$('thk').checked,sr=$('str').checked,k=$('key').value.trim();
 H.push({role:'user',content:t});addM('user',t);
 let body={model:md,messages:[...H],stream:sr,thinking:th};
 if(tl)body.tools=TOOLS;
@@ -315,6 +349,7 @@ $('dm').textContent=(fn||'?')+' | '+rm+' | '+fc.length+'ch';
 }
 }catch(e){L('\n=== ERR ===\n'+e.message);addM('error',e.message);showFmt([{name:'response completed',ok:false,val:e.message,required:true}])}
 $('st').textContent='ready';$('btn').disabled=false;$('inp').focus()}
+loadModels();
 </script>
 </body>
 </html>

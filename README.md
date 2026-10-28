@@ -96,6 +96,25 @@ FlareSolverr is optional for chat, streaming, MCP, and Responses API. Without it
 
 ## Models
 
+By default, the proxy now reads the authenticated website model picker at
+`/rest/models/config/v2` on startup and every six hours. `/v1/models`, MCP, and
+the debug page use this catalog, including the account's detected Pro/Max tier
+and explicit Thinking preferences. Model IDs are the website's exact internal
+preferences; `auto` and available family aliases such as `gpt` and `sonnet`
+remain accepted. Removed fixed generations are not redirected to newer ones.
+
+`MODEL_SYNC_HOURS` controls the interval. `POST /admin/discover-models` refreshes
+the catalog without sending model-probing queries. `/health.model_catalog`
+reports source, last successful sync, detected tier, and errors. A protected
+`.official_models.json` in `DATA_DIR` survives restarts; failed/invalid refreshes
+keep the last successful catalog. FlareSolverr reads the config when the REST
+request encounters Cloudflare. No credentials are copied into the catalog.
+
+Set `MODEL_CATALOG_SOURCE=legacy` to use the original manual `.models.json`,
+`ACCOUNT_TYPE`, and version-probing behavior. In official mode, manual model
+updates return 409 rather than silently changing a separate, unused map.
+The static table below describes that legacy fallback, not the live website.
+
 | Model ID | Backend | Tier | Thinking Variant |
 |----------|---------|------|-----------------|
 | `auto` | Perplexity Best | free+ | — |

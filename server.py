@@ -25,6 +25,7 @@ from file_store import FileStore
 from starlette.datastructures import UploadFile
 from starlette.responses import Response
 from function_tools import prepare_tools, build_tool_instruction, parse_tool_response, function_call_events, ToolConfigError, ToolProtocolError
+from model_catalog import ModelCatalog, cookie_owner
 
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse
@@ -61,6 +62,11 @@ NTFY_COOLDOWN_SECS=int(os.getenv("NTFY_COOLDOWN_SECS", "3600"))
 USER_AGENT=os.getenv("USER_AGENT", "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36")
 ENV_FILE=Path(__file__).parent / ".env"
 FLARESOLVERR_URL=os.getenv("FLARESOLVERR_URL", "http://localhost:8191").rstrip("/")
+MODEL_CATALOG_SOURCE=os.getenv("MODEL_CATALOG_SOURCE", "official")
+MODEL_SYNC_HOURS=float(os.getenv("MODEL_SYNC_HOURS", "6"))
+if MODEL_CATALOG_SOURCE not in {"official", "legacy"} or not 0.05 <= MODEL_SYNC_HOURS <= 168:
+    raise ValueError("Model catalog source must be official/legacy and sync interval must be 0.05..168 hours")
+_official_catalog=None
 
 _MODEL_DISPLAY_ALIASES={
     "pplx_pro": {"pplx_pro", "turbo"},
@@ -416,6 +422,10 @@ _THINKING_MAP={k: v["thinking"] for k, v in _MODEL_REGISTRY.items() if "thinking
 
 def _thinking_model_entry(model_id: str, base_entry: tuple) -> tuple:
     """Derive thinking preferences from the active, possibly upgraded base model."""
+    if _official_catalog and _official_catalog.catalog:
+        metadata=_official_catalog.metadata(model_id)
+        if metadata:
+            return base_entry[0], metadata["thinking_pref"] or base_entry[1]
     spec=_MODEL_REGISTRY.get(model_id, {})
     thinking=spec.get("thinking")
     if not thinking:
@@ -475,6 +485,8 @@ def save_model_map(mm: dict):
 
 def check_tier(model_name: str) -> str:
     """Check if model is available for current account tier. Returns error msg or empty string."""
+    if _official_catalog and _official_catalog.catalog:
+        return ""  # The authenticated website catalog has already applied account eligibility.
     allowed=_TIER_MODELS.get(ACCOUNT_TYPE, _TIER_MODELS["pro"])
     if model_name not in allowed:
         if model_name in _ALL_MODELS:
@@ -490,9 +502,13 @@ def check_tier(model_name: str) -> str:
 
 def get_model_map() -> dict:
     """Get current model map filtered by account tier."""
+    if _official_catalog and _official_catalog.catalog:
+        return _official_catalog.model_map()
     return {k: v for k, v in MODEL_MAP.items() if not check_tier(k)}
 
 MODEL_MAP=load_model_map()
+if MODEL_CATALOG_SOURCE == "official":
+    _official_catalog=ModelCatalog(DATA_DIR / ".official_models.json", cookie_owner(PPLX_COOKIE), _write_json_atomic)
 
 
 async def _iter_sse_events(response):
@@ -1065,11 +1081,19 @@ async def health():
             "url": FLARESOLVERR_URL,
             "last_error": _rate_limit.get("last_error"),
         },
+        "model_catalog": _official_catalog.status() if _official_catalog else {"source": "legacy"},
     }
 
 
 @app.get("/v1/models")
 async def list_models(_=Depends(verify_api_key)):
+    if _official_catalog and _official_catalog.catalog:
+        return {"object": "list", "data": [
+            {"id": model_id, "object": "model", "created": 1700000000, "owned_by": "perplexity",
+             "name": entry["label"], "mode": entry["mode"], "internal_pref": entry["pref"],
+             "thinking_supported": bool(entry["thinking_pref"]), "text_only": entry["text_only"]}
+            for model_id, entry in _official_catalog.catalog["models"].items()
+        ]}
     mm=get_model_map()
     models=[]
     for mid, (mode, pref) in mm.items():
@@ -1494,7 +1518,7 @@ def _responses_resolve_model(model_name: str, use_thinking: bool):
         raise OpenAIAPIError(403, tier_err, param="model")
     if model_name not in mm:
         raise OpenAIAPIError(400, f"Unknown model: {model_name}. Available: {list(mm.keys())}", param="model")
-    if use_thinking and model_name in _THINKING_MAP:
+    if use_thinking and (model_name in _THINKING_MAP or (_official_catalog and _official_catalog.metadata(model_name))):
         mode, model_pref=_thinking_model_entry(model_name, mm[model_name])
         log.info(f"thinking on → {model_name} using {model_pref}")
     else:
@@ -2387,7 +2411,7 @@ async def chat_completions(request: Request, _=Depends(verify_api_key)):
 
     # Thinking mode: thinking=true OR reasoning_effort != "none"
     use_thinking=thinking or (reasoning_effort is not None and reasoning_effort != "none")
-    if use_thinking and model_name in _THINKING_MAP:
+    if use_thinking and (model_name in _THINKING_MAP or (_official_catalog and _official_catalog.metadata(model_name))):
         mode, model_pref=_thinking_model_entry(model_name, mm[model_name])
         log.info(f"thinking on → {model_name} using {model_pref}")
     else:
@@ -2724,6 +2748,11 @@ async def discover_models(request: Request, _=Depends(verify_api_key)):
     3. If dead, increment version until found or +1.0 reached
     4. Auto-upgrade thinking variant along with base
     """
+    if _official_catalog:
+        result=await _sync_official_models()
+        if result["last_error"]:
+            raise OpenAIAPIError(502, result["last_error"], err_type="upstream_error")
+        return {"status": "ok", "catalog": result}
     client=get_client()
     await client.init()
 
@@ -2893,7 +2922,10 @@ async def perplexity_models() -> str:
     """List all available Perplexity models with their modes and IDs.
     Use these IDs as the 'model' parameter in other tools."""
     mm=get_model_map()
-    lines=[f"Default model: {DEFAULT_MODEL}", f"Account type: {ACCOUNT_TYPE}", "", "Available models:"]
+    if _official_catalog and _official_catalog.catalog:
+        mm={key: value for key, value in mm.items() if key in _official_catalog.catalog["models"]}
+    tier=_official_catalog.account_type if _official_catalog and _official_catalog.catalog else ACCOUNT_TYPE
+    lines=[f"Default model: {DEFAULT_MODEL}", f"Account type: {tier}", "", "Available models:"]
     by_mode={}
     for mid, (mode, pref) in mm.items():
         by_mode.setdefault(mode, []).append(mid)
@@ -2980,6 +3012,8 @@ async def update_models_endpoint(request: Request, _=Depends(verify_api_key)):
     Format: {"models": {"model-id": ["mode", "internal_pref"], ...}, "merge": true/false}
     merge=true (default): add/update entries. merge=false: replace entire map.
     """
+    if _official_catalog and _official_catalog.catalog:
+        raise OpenAIAPIError(409, "Website model synchronization is enabled; set MODEL_CATALOG_SOURCE=legacy to manage a manual model map", param="models")
     body=await _read_json_object(request)
     new_models=body.get("models", {})
     if not isinstance(new_models, dict):
@@ -3009,7 +3043,10 @@ async def update_models_endpoint(request: Request, _=Depends(verify_api_key)):
 async def get_models_admin(_=Depends(verify_api_key)):
     """Get full model map with internal details."""
     mm=get_model_map()
-    return {"default": DEFAULT_MODEL, "account_type": ACCOUNT_TYPE, "models": {k: {"mode": v[0], "pref": v[1]} for k, v in mm.items()}}
+    tier=_official_catalog.account_type if _official_catalog and _official_catalog.catalog else ACCOUNT_TYPE
+    return {"default": DEFAULT_MODEL, "account_type": tier,
+            "catalog": _official_catalog.status() if _official_catalog else {"source": "legacy"},
+            "models": {k: {"mode": v[0], "pref": v[1]} for k, v in mm.items()}}
 
 
 # ─── Session Keep-Alive ────────────────────────────────────────────────────
@@ -3136,11 +3173,42 @@ async def refresh_cookie_endpoint(request: Request, _=Depends(verify_api_key)):
     global MODEL_MAP
     MODEL_MAP=load_model_map()
     _configured_session_state.update({"status": "active", "source": "admin", "message": None})
-    return {"status": "ok", "message": "Cookie updated and validated", "models_loaded": len(MODEL_MAP)}
+    if _official_catalog:
+        _official_catalog.owner=cookie_owner(token)
+        _official_catalog.catalog=None
+        _official_catalog.account_type=None
+        _official_catalog.updated_at=None
+        _official_catalog.last_error=None
+        await _sync_official_models()
+    count=len(_official_catalog.catalog["models"]) if _official_catalog and _official_catalog.catalog else len(MODEL_MAP)
+    return {"status": "ok", "message": "Cookie updated and validated", "models_loaded": count}
+
+
+async def _sync_official_models():
+    try:
+        status=await _official_catalog.refresh(get_client(), FLARESOLVERR_URL)
+        if _official_catalog.catalog:
+            for entry in _official_catalog.catalog["models"].values():
+                _PREF_LABELS[entry["pref"]]=entry["label"]
+                if entry["thinking_pref"]:
+                    _PREF_LABELS[entry["thinking_pref"]]=entry["label"]+" Thinking"
+        return status
+    except Exception as error:
+        _official_catalog.last_error=f"Website model synchronization failed ({type(error).__name__}); previous catalog retained"
+        return _official_catalog.status()
 
 
 async def auto_discover_loop():
     """Background task: run model discovery every PROBE_INTERVAL_HOURS."""
+    if _official_catalog:
+        while True:
+            status=await _sync_official_models()
+            if status["last_error"] or not _official_catalog.catalog:
+                log.warning("%s", status["last_error"] or "Website model synchronization pending")
+            else:
+                log.info("Website model catalog synchronized: %s models, %s account", status["model_count"], status["account_type"])
+            interval=MODEL_SYNC_HOURS * 3600 if _official_catalog.catalog else 300
+            await asyncio.sleep(interval)
     log.info(f"Auto-discovery enabled: every {PROBE_INTERVAL_HOURS}h")
     while True:
         await asyncio.sleep(PROBE_INTERVAL_HOURS * 3600)
