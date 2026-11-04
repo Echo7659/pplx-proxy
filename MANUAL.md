@@ -441,7 +441,7 @@ Multi-turn: pass `previous_response_id` from the previous response. Previous `in
 
 Stored responses live in `.responses_store.json` (max 300, 7-day TTL). `store: false` does not retain the response, so retrieval and continuation by that response ID are unavailable.
 
-Background requests require `store: true`; only active background responses can be cancelled. Built-in web-search requests accept only `tool_choice: "auto"`; the experimental function choices are described below. Custom `temperature`/`top_p` values other than 1, `max_output_tokens`, `truncation: "auto"`, and strict text-output JSON schemas are rejected. JSON-object mode and non-strict text schemas use prompt instructions only; output conformance is not guaranteed. Store read/write failures are reported instead of treating failed persistence as success.
+Background requests require `store: true`; only active background responses can be cancelled. Built-in web-search requests accept only `tool_choice: "auto"`; the experimental function choices are described below. Sampling settings and token limits are accepted and removed before the upstream request for client compatibility; their requested values are not enforced. `truncation: "auto"` and strict text-output JSON schemas are rejected. JSON-object mode and non-strict text schemas use prompt instructions only; output conformance is not guaranteed. Store read/write failures are reported instead of treating failed persistence as success.
 
 For ordinary text requests, successful streaming emits these SSE events in order (the reasoning events are omitted when no reasoning is available):
 
@@ -766,4 +766,6 @@ The assembled query limit is 96,000 characters. Oversized input is rejected rath
 
 `./inject_cookie.sh` reads the new token using a hidden prompt (or standard input when piped). It reads `.env` beside the script and updates the running local service through `/admin/refresh-cookie`, which validates the token before persisting it. No service restart is needed. The service must already be running; use `.env` for initial setup. Avoid passing the token as a command argument, where shell history or process listings could expose it.
 
-Chat Completions rejects unsupported generation controls with HTTP 400, including custom sampling, output-token limits, structured response formats, multiple choices, stop sequences, nondefault penalties, seeds, logprobs, and streaming usage requests. These options are not silently ignored.
+For client compatibility, both OpenAI endpoints validate and remove `temperature`, `top_p`, `presence_penalty`, `frequency_penalty`, `max_tokens`, `max_completion_tokens`, and `max_output_tokens` before constructing the Perplexity request. Sampling and penalty values must be finite numbers; token limits must be positive integers. `null` is accepted and removed. These settings do not control Perplexity generation: output length is provider-controlled and requested token limits are not enforced.
+
+Chat Completions continues to reject structured response formats, multiple choices, stop sequences, seeds, logprobs, and streaming usage requests with HTTP 400. Invalid compatibility-setting types also return HTTP 400.

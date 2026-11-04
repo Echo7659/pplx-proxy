@@ -175,7 +175,7 @@ Tracked candidates such as Claude Haiku 4.5, Gemini 3.1 Flash Lite, and Grok 4.2
 
 `POST /v1/responses` accepts OpenAI Responses API requests (`input`, `instructions`, `previous_response_id`, `stream`, `store`, `reasoning`, `text.format`). Responses are stored by default so you can `GET` / `DELETE` them and continue a thread with `previous_response_id`. With `store: false`, they are not retained or retrievable.
 
-Built-in web search is always on. Responses web-search tools are accepted because they use that existing search behavior. Background requests require `store: true`; only active background requests can be cancelled. Custom sampling values, output-token limits, automatic truncation, and strict **text-output** JSON schemas are rejected. JSON-object and non-strict text schema modes are prompt-based requests, not guaranteed structured output. File search, code interpreter, computer use, and image generation remain unsupported.
+Built-in web search is always on. Responses web-search tools are accepted because they use that existing search behavior. Background requests require `store: true`; only active background requests can be cancelled. Sampling settings and token limits are accepted and ignored for client compatibility; they do not enforce sampling behavior or output length. Automatic truncation and strict **text-output** JSON schemas are rejected. JSON-object and non-strict text schema modes are prompt-based requests, not guaranteed structured output. File search, code interpreter, computer use, and image generation remain unsupported.
 
 Function definitions in `tools` enable an **experimental prompt-mediated bridge**. One full SDK loop succeeded, but a subsequent auto-selection test returned non-JSON output and failed with `tool_protocol_error`. Reliability is not established; passing unit and container tests verifies the proxy behavior, not model compliance. No retry or fallback hides these failures.
 
@@ -237,6 +237,8 @@ A real PNG input has passed an official SDK test. Use a Responses `input_image` 
 Document upload and model-readable document input are different steps. Document processing must finish through Perplexity's `/rest/sse/attachment_processing/subscribe` endpoint before a query can use it. That endpoint currently receives Cloudflare 403, so document input is **not working** and returns an explicit **502**. Do not treat successful local file upload as a successful document-reading test.
 
 ### OpenAI API
+
+For client compatibility, both OpenAI endpoints validate and remove `temperature`, `top_p`, `presence_penalty`, `frequency_penalty`, `max_tokens`, `max_completion_tokens`, and `max_output_tokens` before constructing the Perplexity request. Sampling and penalty values must be finite numbers; token limits must be positive integers. `null` is accepted and removed. These settings do not control Perplexity generation: output length is provider-controlled and requested token limits are not enforced.
 
 
 ```bash
@@ -393,4 +395,6 @@ Run `./inject_cookie.sh` for a hidden token prompt, or pipe a token on standard 
 
 Requests exceeding the 96,000-character query limit receive an explicit error; the proxy does not silently truncate conversation content. `/health` reports cached quota immediately and schedules a refresh when needed. A successful chat stream ends with `[DONE]`; a failed stream emits an error instead of reporting success.
 
-Chat Completions rejects unsupported generation controls with HTTP 400, including custom sampling, output-token limits, structured response formats, multiple choices, stop sequences, nondefault penalties, seeds, logprobs, and streaming usage requests. These options are not silently ignored.
+Sampling, penalties, and token limits follow the compatibility rules above; their requested values are not enforced by Perplexity.
+
+Chat Completions continues to reject structured response formats, multiple choices, stop sequences, seeds, logprobs, and streaming usage requests with HTTP 400. Invalid compatibility-setting types also return HTTP 400.

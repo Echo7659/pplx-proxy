@@ -50,7 +50,7 @@ class ChatReviewTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unsupported_generation_controls_are_rejected(self):
         base={'model': 'auto', 'messages': [{'role': 'user', 'content': 'hello'}]}
-        for control in ({'temperature': 0.2}, {'max_tokens': 10}, {'n': 2}, {'stop': ['end']}, {'response_format': {'type': 'json_object'}}, {'stream_options': {'include_usage': True}}):
+        for control in ({'n': 2}, {'stop': ['end']}, {'response_format': {'type': 'json_object'}}, {'stream_options': {'include_usage': True}}):
             with patch.object(server, 'get_client') as client:
                 response=await self.http.post('/v1/chat/completions', json={**base, **control})
                 self.assertEqual(response.status_code, 400, response.text)

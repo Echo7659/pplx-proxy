@@ -261,7 +261,6 @@ class ResponsesApiTests(unittest.TestCase):
                 {"previous_response_id": {}}, {"conversation": {"id": []}},
                 {"text": {"format": []}}, {"reasoning": "high"}, {"tools": {}},
                 {"tools": [{"type": "function", "name": ""}]}, {"tool_choice": "required"},
-                {"temperature": 0.2}, {"top_p": 0.5}, {"max_output_tokens": 100},
                 {"text": {"format": {"type": "json_schema", "strict": True, "schema": {}}}},
                 {"background": True, "store": False}, {"input": [{"type": "item_reference", "id": "missing"}]}]
             for fields in invalid:

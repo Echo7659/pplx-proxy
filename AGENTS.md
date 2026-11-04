@@ -88,7 +88,7 @@ CUSTOM_PROMPTS       # Local prompt block prepended to every LobeHub request
 
 **Auth required** (Bearer token):
 - `GET /v1/models` — tier-filtered model list (OpenAI-compatible format)
-- `POST /v1/chat/completions` — chat (streaming + non-streaming, thinking). Unsupported function tools and generation controls are rejected with HTTP 400.
+- `POST /v1/chat/completions` — chat (streaming + non-streaming, thinking). Finite sampling/penalty settings and positive integer token limits are validated and removed for client compatibility; their values are not enforced upstream. Unsupported function tools and other generation controls remain HTTP 400.
 - `POST /v1/responses` — OpenAI Responses API compatibility; image input and experimental validated prompt-mediated function calls
 - `POST` / `GET /v1/files` — local upload/list
 - `GET` / `DELETE /v1/files/{id}` — local metadata/delete
@@ -452,7 +452,7 @@ Perplexity returns SSE events containing `blocks[]` with these types:
 
 - `store=false` Responses are not retained. Corrupt runtime stores and write failures surface as errors.
 - Health checks return cached quota immediately and schedule stale refreshes without waiting for a browser. Check `flaresolverr.status` and `last_error` for quota-fetch failures.
-- This release includes verified PNG input and local file storage. Responses function proposals remain experimental after a successful loop and a failed repeat; document input still fails during upstream processing. Chat function tools remain 400. Custom sampling/output limits and strict text-output schema enforcement are rejected; function parameter validation is separate.
+- This release includes verified PNG input and local file storage. Responses function proposals remain experimental after a successful loop and a failed repeat; document input still fails during upstream processing. Chat function tools remain 400. Both OpenAI endpoints validate and remove `temperature`, `top_p`, `presence_penalty`, `frequency_penalty`, `max_tokens`, `max_completion_tokens`, and `max_output_tokens` before upstream requests and Responses record construction. Numeric sampling/penalty values must be finite; token caps must be positive integers; null is removed. Perplexity controls sampling and output length; these client settings are not enforced. Strict text-output schema enforcement remains rejected; function parameter validation is separate.
 - Upstream streams must terminate correctly; interrupted or malformed streams fail. Resources and background tasks close on shutdown. MCP is a required dependency; incompatible installations fail at startup.
 - Prompt bodies are logged only at DEBUG. Docker excludes cookies, response history, and browser state.
 - Pre-release feature verification: 147 Python tests and 7 Node tests passed locally; Docker build and its 147 Python tests passed. Isolated ordinary Chat, streaming, and Responses smoke checks passed. These tests validate proxy behavior, not model protocol compliance, and do not remove the document-processing blocker or the observed function reliability failure.

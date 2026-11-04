@@ -14,6 +14,7 @@ import re
 import hashlib
 import copy
 import threading
+import math
 from contextlib import asynccontextmanager, aclosing
 from uuid import uuid4
 from typing import Optional, AsyncGenerator
@@ -1006,6 +1007,30 @@ class OpenAIAPIError(Exception):
         super().__init__(message)
 
 
+_IGNORED_SAMPLING_CONTROLS=("temperature", "top_p", "presence_penalty", "frequency_penalty")
+_IGNORED_TOKEN_LIMITS=("max_tokens", "max_completion_tokens", "max_output_tokens")
+
+
+def _normalize_generation_controls(body: dict) -> dict:
+    """Accept client generation settings without claiming Perplexity enforces them."""
+    for name in _IGNORED_SAMPLING_CONTROLS:
+        value=body.get(name)
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, (int, float))
+            or isinstance(value, float) and not math.isfinite(value)
+        ):
+            raise OpenAIAPIError(400, f"{name} must be a finite number", param=name)
+    for name in _IGNORED_TOKEN_LIMITS:
+        value=body.get(name)
+        if value is not None and (type(value) is not int or value <= 0):
+            raise OpenAIAPIError(400, f"{name} must be a positive integer", param=name)
+    ignored=set(_IGNORED_SAMPLING_CONTROLS + _IGNORED_TOKEN_LIMITS)
+    supplied=ignored.intersection(body)
+    if supplied:
+        log.debug("Ignoring client generation controls unsupported by Perplexity: %s", ", ".join(sorted(supplied)))
+    return {name: value for name, value in body.items() if name not in ignored}
+
+
 # ─── Auth middleware ───────────────────────────────────────────────────────
 
 async def verify_api_key(request: Request):
@@ -1984,7 +2009,7 @@ async def _responses_tools_api(body, model_name, mode, pref, policy):
 @app.post("/v1/responses")
 async def responses_api(request: Request, _=Depends(verify_api_key)):
     """OpenAI Responses API compatibility: create, stream, store, and chain turns."""
-    body=await _read_json_object(request)
+    body=_normalize_generation_controls(await _read_json_object(request))
 
     for name in ("stream", "background", "store", "parallel_tool_calls"):
         if name in body and body[name] is not None and not isinstance(body[name], bool):
@@ -2019,12 +2044,6 @@ async def responses_api(request: Request, _=Depends(verify_api_key)):
         raise OpenAIAPIError(400, str(exc), param=exc.param) from exc
     if tool_policy is None and body.get("tool_choice", "auto") not in (None, "auto"):
         raise OpenAIAPIError(400, "Built-in web search cannot be forced or disabled", param="tool_choice")
-    for name in ("temperature", "top_p"):
-        value=body.get(name)
-        if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float)) or value != 1):
-            raise OpenAIAPIError(400, f"Custom {name} is not supported by Perplexity", param=name)
-    if body.get("max_output_tokens") is not None:
-        raise OpenAIAPIError(400, "max_output_tokens is not supported by Perplexity", param="max_output_tokens")
     if body.get("truncation") not in (None, "disabled"):
         raise OpenAIAPIError(400, "Automatic truncation is not supported; shorten the input explicitly", param="truncation")
     text_format=(body.get("text") or {}).get("format")
@@ -2342,7 +2361,7 @@ async def _read_json_object(request):
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request, _=Depends(verify_api_key)):
-    body=await _read_json_object(request)
+    body=_normalize_generation_controls(await _read_json_object(request))
     model_name=body.get("model", DEFAULT_MODEL)
     messages=body.get("messages", None)
     stream=body.get("stream", False)
@@ -2365,11 +2384,10 @@ async def chat_completions(request: Request, _=Depends(verify_api_key)):
     if body.get("tools") or body.get("functions") or body.get("tool_choice") not in (None, "none", "auto"):
         raise OpenAIAPIError(400, "Function calling is not supported", param="tools")
 
-    for name, default in (("temperature", 1), ("top_p", 1), ("n", 1), ("presence_penalty", 0), ("frequency_penalty", 0)):
-        value=body.get(name)
-        if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float)) or value != default):
-            raise OpenAIAPIError(400, f"Custom {name} is not supported by Perplexity", param=name)
-    for name in ("max_tokens", "max_completion_tokens", "stop", "seed", "logit_bias", "top_logprobs"):
+    count=body.get("n")
+    if count is not None and (isinstance(count, bool) or not isinstance(count, (int, float)) or count != 1):
+        raise OpenAIAPIError(400, "Custom n is not supported by Perplexity", param="n")
+    for name in ("stop", "seed", "logit_bias", "top_logprobs"):
         if body.get(name) is not None:
             raise OpenAIAPIError(400, f"{name} is not supported by Perplexity", param=name)
     if body.get("logprobs") not in (None, False):
